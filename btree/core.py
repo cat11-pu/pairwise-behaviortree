@@ -6,7 +6,6 @@ hierarchical blackboard and a per-tick execution budget.
 
 from __future__ import annotations
 
-import time
 from enum import Enum
 
 
@@ -29,13 +28,10 @@ class Blackboard:
         self.parent = parent
         self.name = name
         self._data = {}
-        self._child = None
 
     def child(self, name=None):
         """Return a nested scope."""
-        if self._child is None:
-            self._child = Blackboard(parent=self, name=name)
-        return self._child
+        return Blackboard(parent=self, name=name)
 
     def set(self, key, value):
         """Store a key in this scope."""
@@ -120,7 +116,7 @@ class Action(Node):
 
     def tick(self, ctx):
         if not ctx.consume():
-            return Status.SUCCESS
+            return Status.RUNNING
         result = self.fn(ctx.blackboard)
         if isinstance(result, Status):
             return result
@@ -143,6 +139,8 @@ class Composite(Node):
 
     def reset(self):
         self._index = 0
+        for child in self.children:
+            child.reset()
 
 
 class Sequence(Composite):
@@ -156,6 +154,7 @@ class Sequence(Composite):
             elif status is Status.RUNNING:
                 return Status.RUNNING
             else:
+                self._index = 0
                 return Status.FAILURE
         self._index = 0
         return Status.SUCCESS
@@ -170,6 +169,8 @@ class Selector(Composite):
             if status is Status.SUCCESS:
                 self._index = 0
                 return Status.SUCCESS
+            if status is Status.RUNNING:
+                return Status.RUNNING
             self._index += 1
         self._index = 0
         return Status.FAILURE
@@ -191,6 +192,8 @@ class Inverter(Decorator):
 
     def tick(self, ctx):
         status = self.child.tick(ctx)
+        if status is Status.RUNNING:
+            return Status.RUNNING
         if status is Status.SUCCESS:
             return Status.FAILURE
         return Status.SUCCESS
@@ -210,11 +213,12 @@ class RepeatUntilFail(Decorator):
     """Ticks its child over and over until the child fails."""
 
     def tick(self, ctx):
-        self.child.reset()
         status = self.child.tick(ctx)
         if status is Status.FAILURE:
             self.child.reset()
             return Status.SUCCESS
+        if status is Status.SUCCESS:
+            self.child.reset()
         return Status.RUNNING
 
 
@@ -226,19 +230,19 @@ class Cooldown(Decorator):
         if ticks < 0:
             raise ValueError("ticks must not be negative")
         self.ticks = ticks
-        self._ready_at = 0.0
+        self._remaining = 0
 
     def tick(self, ctx):
-        now = time.time()
-        if now < self._ready_at:
+        if self._remaining > 0:
+            self._remaining -= 1
             return Status.FAILURE
         status = self.child.tick(ctx)
         if status is not Status.RUNNING:
-            self._ready_at = now + self.ticks
+            self._remaining = self.ticks
         return status
 
     def reset(self):
-        self._ready_at = 0.0
+        self._remaining = 0
         super().reset()
 
 
